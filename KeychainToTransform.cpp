@@ -1651,7 +1651,7 @@ void find_camera(EDIT_SECTION* edit, TargetObject& t, int layer, int frame) {
 			pos[i] = read_track(edit, cam, CAMERA_EFFECT, pos_items[i], frame, 0);
 			target[i] = read_track(edit, cam, CAMERA_EFFECT, target_items[i], frame, 0);
 		}
-		// 目標レイヤーが指定されている場合は、そのレイヤーのオブジェクトの座標を目標点とする (実機で要確認)
+		// 目標レイヤーが指定されている場合は、そのレイヤーのオブジェクトの座標を目標点とする
 		int target_layer = (int)read_track(edit, cam, CAMERA_EFFECT, L"目標レイヤー", frame, 0);
 		if (target_layer > 0) {
 			OBJECT_HANDLE obj = find_object_at(edit, target_layer - 1, frame);
@@ -1999,7 +1999,6 @@ void save_settings() {
 
 //=======================================================================
 //	設定ダイアログ (「設定」→「Keychain to Transform設定」から開く)
-//	PaletteHistoryと同じく、.rcを使わずCreateWindowExで組んだポップアップ上で独自のメッセージループを回す
 //=======================================================================
 #define IDC_BTN_OK 2001
 #define IDC_BTN_CANCEL 2002
@@ -2117,7 +2116,6 @@ void show_config_dialog(HWND parent, HINSTANCE dll_hinst) {
 		y = prc.top + ((prc.bottom - prc.top) - dh) / 2;
 	}
 
-	// ホストから渡されたdll_hinstではなくGetModuleHandle(0)を使う (RegisterClassExと一致させないとウィンドウを作れないため。PaletteHistoryのDESIGN.md参照)
 	(void)dll_hinst;
 	HINSTANCE hinst = GetModuleHandle(0);
 	HWND dlg = CreateWindowEx(WS_EX_DLGMODALFRAME, CONFIG_DLG_CLASS_NAME, L"Keychain to Transform設定",
@@ -2174,7 +2172,7 @@ void show_config_dialog(HWND parent, HINSTANCE dll_hinst) {
 	ShowWindow(dlg, SW_SHOW);
 	UpdateWindow(dlg);
 
-	// WM_QUITはこのループ自身のGetMessageに消費させる (途中でループを抜けるとホスト側へWM_QUITが流出するため。PaletteHistoryのDESIGN.md参照)
+	// WM_QUITはこのループ自身のGetMessageに消費させる (途中でループを抜けるとホスト側へWM_QUITが流出するため。)
 	MSG msg;
 	while (GetMessage(&msg, nullptr, 0, 0)) {
 		if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && msg.hwnd != nullptr && GetAncestor(msg.hwnd, GA_ROOT) == dlg) {
