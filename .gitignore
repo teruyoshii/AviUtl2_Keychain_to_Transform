@@ -10,3 +10,4 @@ make_package.ps1
 
 # 配布用パッケージ (リリースにのみ添付する)
 *.au2pkg.zip
+img/demo.mp4
