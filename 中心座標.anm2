@@ -1,4 +1,5 @@
 --information:中心座標 ver1.0.1 by sikemoti
+--label:基本効果
 --track@x:X,-1000,1000,0,0.01
 --track@y:Y,-1000,1000,0,0.01
 --track@z:Z,-1000,1000,0,0.01
@@ -8,7 +9,7 @@
 --value@params_table:_,{}
 
 -- sikemoti氏の「中心座標調整」ver1.0.1 を、Keychain to Transform に同梱するため「中心座標」に改名したものです。
--- 改名以外の変更はありません。ライセンスは同梱の「中心座標_LICENSE.txt」(MIT License, Copyright (c) 2026 sikemoti)を参照してください。
+-- 改名と、ラベル(--label:基本効果)の追加以外の変更はありません。ライセンスは同梱の「中心座標_LICENSE.txt」(MIT License, Copyright (c) 2026 sikemoti)を参照してください。
 
 local params_table = params_table or {}
 local x = params_table[1] or x
