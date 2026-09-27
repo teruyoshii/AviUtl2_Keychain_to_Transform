@@ -1,0 +1,16 @@
+Keychain to Transform v0.1
+
+Blenderのように、ショートカットキーを続けて押すことでオブジェクトを移動・回転・拡大するプラグインです。
+
+■インストール後に必要な設定
+左上メニューの「設定」→「ショートカットキーの設定」で、次のコマンドにキーを割り当ててください。
+  Keychain to Transform: 移動      (例: G)
+  Keychain to Transform: 中心移動  (例: H)
+  Keychain to Transform: 回転      (例: R)
+  Keychain to Transform: 拡大      (例: S)
+
+■注意
+操作中の値の変化がUndo履歴に大量に積まれます。操作前の状態に戻すには、Undoを何度も繰り返す必要があります。
+
+■同梱スクリプト
+中心移動で使う「中心座標」は、sikemoti氏の「中心座標調整」スクリプト(MIT License)を、名前の衝突を避けるため改名して同梱したものです。
