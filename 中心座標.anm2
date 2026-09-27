@@ -6,18 +6,9 @@
 --check@position_correction:位置補正,1
 --check@is_percent_mode:パーセントで指定,1
 --check@is_zoom_consider:拡大率を考慮する,1
---value@params_table:_,{}
 
 -- sikemoti氏の「中心座標調整」ver1.0.1 を、Keychain to Transform に同梱するため「中心座標」に改名したものです。
--- 改名と、ラベル(--label:基本効果)の追加以外の変更はありません。ライセンスは同梱の「中心座標_LICENSE.txt」(MIT License, Copyright (c) 2026 sikemoti)を参照してください。
-
-local params_table = params_table or {}
-local x = params_table[1] or x
-local y = params_table[2] or y
-local z = params_table[3] or z
-local is_position_correction = params_table[4] or position_correction
-local is_percent_mode = params_table[5] or is_percent_mode
-local is_zoom_consider = params_table[6] or is_zoom_consider
+-- 改名、ラベル(--label:基本効果)の追加、外部から値を渡すためのparams_tableの削除以外の変更はありません。ライセンスは同梱の「中心座標_LICENSE.txt」(MIT License, Copyright (c) 2026 sikemoti)を参照してください。
 
 local w, h = obj.getpixel()
 
@@ -30,7 +21,7 @@ if (is_percent_mode) then
     end
 end
 
-if (is_position_correction) then
+if (position_correction) then
     obj.ox = obj.ox + x
     obj.oy = obj.oy + y
     obj.oz = obj.oz + z
