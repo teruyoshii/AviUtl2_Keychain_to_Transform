@@ -7,7 +7,7 @@
 //		選択中オブジェクトの標準描画(標準描画が無ければグループ制御等。Alt指定中や時間変化する項目はエフェクト)の値を変更する。
 //		操作中のみメインスレッド限定のキーボード/マウスフックを張り、入力を横取りする。
 //
-//	v0.1 By teruyoshi
+//	v0.2 By teruyoshi
 //----------------------------------------------------------------------------------
 #define NOMINMAX
 #include <windows.h>
@@ -315,7 +315,7 @@ ModalState g_state;
 //---------------------------------------------------------------------
 COMMON_PLUGIN_TABLE common_plugin_table = {
 	L"Keychain to Transform",
-	L"Keychain to Transform version 0.1 By teruyoshi",
+	L"Keychain to Transform version 0.2 By teruyoshi",
 };
 
 EXTERN_C __declspec(dllexport) void InitializeLogger(LOG_HANDLE* handle) {

@@ -1,4 +1,4 @@
-Keychain to Transform v0.1
+Keychain to Transform v0.2
 
 Blenderのように、ショートカットキーを続けて押すことでオブジェクトを移動・回転・拡大するプラグインです。
 
