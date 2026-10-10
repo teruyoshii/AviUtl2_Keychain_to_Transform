@@ -46,6 +46,7 @@ struct Settings {
 	int poll_ms = 33;				// マウス位置の読み取り・値の反映間隔(ミリ秒)。長くするとUndoに積まれる件数が減る
 	bool invert_camera_pitch = false;	// カメラ制御の上下の向き(X軸回転)で、マウスの縦方向を反転する
 	bool invert_wheel = false;		// ホイールの向きを反転する
+	bool single_undo = true;		// 操作中の変更をUndo 1件にまとめる (直前の自分の書き込みを本体のUndoで取り消してから書き込み直す)
 	// 拡大率の代わりに優先して変更する大きさの項目名 (カンマ区切り、左を優先)。[0]=X [1]=Y [2]=Z [3]=全体
 	std::wstring size_items[4] = { L"幅,X幅", L"高さ,Y幅", L"奥行き,Z幅", L"サイズ" };
 };
@@ -206,8 +207,8 @@ const wchar_t* GENERIC_ITEM_CANDIDATES[ITEM_NUM][2] = {
 //	対象項目 (エフェクト)
 //	Alt指定中、または変更する標準描画の項目が時間変化する場合は、標準描画の代わりにこれらのエフェクトを変更する。
 //	拡大の軸指定は標準描画に軸別の拡大率が無いため、常に拡大率エフェクトを変更する。
-//	中心移動の「中心座標」は標準エフェクトではなく、sikemoti氏の「中心座標」スクリプト(MIT License)を改名して同梱したもの。
-//	(利用者が元の「中心座標」を別途導入している場合と名前が衝突しないよう改名している。導入されていなければ追加に失敗し変更しない)
+//	中心移動の「中心座標」は標準エフェクトではなく、sikemoti氏の「中心座標調整」スクリプト(MIT License)を改名して同梱したもの。
+//	(利用者が元の「中心座標調整」を別途導入している場合と名前が衝突しないよう改名している。導入されていなければ追加に失敗し変更しない)
 //	X,Y,Zの3項目は先頭に並べる (軸番号で参照するため)
 //---------------------------------------------------------------------
 enum EffectKind { FX_MOVE, FX_CENTER, FX_ROTATE, FX_SCALE, FX_NUM };
@@ -232,6 +233,7 @@ struct EffectSlot {
 	TrackValue track[4];	// 開始時の値 (キー指定用で追加した場合は移動を設定した後の値)
 	std::string applied[4];	// 直近に書き込んだ値 (変化が無い項目は書き込まないために使う)
 	bool valid[4] = {};		// 変更できる項目か (通常=単一の数値、キー指定用=キーの数が区間数+1の移動設定)
+	bool defaults_known = false;	// Undoで1件にまとめる方式で、追加したエフェクトがUndoで消えた後も初期値(track)を覚えているか
 };
 
 //---------------------------------------------------------------------
@@ -253,6 +255,7 @@ struct TargetObject {
 	const wchar_t* items[ITEM_NUM] = {};		// 各項目に対応する項目名 (nullptr=持たない)
 	const wchar_t* center_label = L"中心";		// HUDでの中心の表示名
 	bool force_effect = false;					// 操作に対応する項目を持たないため、常にエフェクトを追加して変更する
+	bool excluded = false;						// Undoで1件にまとめる方式で、エフェクトを追加できず対象外にした
 	TrackValue track[ITEM_NUM];		// 操作開始時の値
 	std::string applied[ITEM_NUM];	// 直近に書き込んだ値 (変化が無い項目は書き込まないために使う)
 	double now[ITEM_NUM] = {};		// 現在フレームでの値 (ローカル軸の回転行列、変更しない軸の値に使う)
@@ -289,6 +292,21 @@ struct ModalState {
 	UINT trigger_key = 0;				// 起点のコマンドを呼び出したキー (0=不明)
 	std::wstring numeric;				// 入力中の数値・式 (例: "10*5", "*2")
 	int pending_finish = -1;			// ボタン押下で予約した終了種別 (1=確定 0=キャンセル -1=無し)
+
+	// Undoを1件にまとめる方式 (直前の自分の書き込みを本体のUndoで取り消してから、操作開始時の状態に書き込み直す)
+	bool single_undo = false;			// この方式で操作中か (設定が有効で、メインメニューの「元に戻す」が見つかった場合)
+	UINT undo_id = 0;					// メインメニューの「元に戻す」のコマンドID
+	bool own_entry = false;				// 直前の反映で自分の書き込みがUndoに1件積まれているか (積まれている時だけUndoする)
+	bool ever_wrote = false;			// この操作で一度でも書き込んだか (キャンセルした時に、本体のやり直せる分が置き換わったかを伝えるため)
+	// Undoが済んだかを確かめるための、直前の反映で最初に成功した書き込み
+	struct Probe {
+		enum class Kind { None, Item, EffectCreated, EffectItem } kind = Kind::None;
+		OBJECT_HANDLE object = nullptr;
+		std::wstring effect_name;		// Item: 書き込んだエフェクト名
+		int64_t effect_id = 0;			// EffectCreated / EffectItem: エフェクトID
+		std::wstring item;				// Item / EffectItem: 項目名
+		std::string before, after;		// Item / EffectItem: 書き込む前(開始時)の値と書き込んだ値
+	} probe;
 };
 ModalState g_state;
 
@@ -1230,6 +1248,318 @@ void sync_values(Finish finish) {
 }
 
 //=======================================================================
+//	他のプラグインへの「操作中」の印
+//	Undoを1件にまとめる方式では、操作中に本体のUndoと書き込みを繰り返すため、本体のUndo履歴を監視するプラグイン(EditHistory等)が
+//	途中の状態を読むと記録が壊れる。操作中はメインウィンドウにプロパティを付け、終わったら外して登録メッセージを送る。
+//	監視する側は、印が付いている間の通知とUndoのコマンドの観測をまとめ、終了のメッセージを受けてから1回だけ処理する。
+//	終了のメッセージのwParamで操作の結果を伝える:
+//	  0 = 何も書き込まなかった
+//	  1 = 確定した (本体のUndo履歴に1件積まれ、やり直せる分は無くなった)
+//	  2 = 書き込んだ後にキャンセルした (本体の状態は開始時のままだが、やり直せる分はキャンセルした変形の1件に置き換わった)
+//	  3 = 途中でUndoをまとめる方式をやめた (本体のUndo履歴に複数件積まれている可能性がある)
+//=======================================================================
+const wchar_t* ACTIVE_PROP_NAME = L"KeychainToTransform.SingleUndoActive";		// 操作中にメインウィンドウに付けるプロパティ
+const wchar_t* FINISHED_MESSAGE_NAME = L"KeychainToTransform.SingleUndoFinished";	// 操作を終えた時にメインウィンドウへPostMessageする登録メッセージ
+enum FinishedResult { RESULT_NO_WRITE = 0, RESULT_COMMITTED = 1, RESULT_CANCELED = 2, RESULT_FALLBACK = 3 };
+
+void set_active_mark(bool active, WPARAM result = RESULT_NO_WRITE) {
+	HWND main = edit_handle->get_host_app_window();
+	if (!main) return;
+	if (active) {
+		SetPropW(main, ACTIVE_PROP_NAME, (HANDLE)1);
+	} else if (GetPropW(main, ACTIVE_PROP_NAME)) {
+		RemovePropW(main, ACTIVE_PROP_NAME);
+		PostMessageW(main, RegisterWindowMessageW(FINISHED_MESSAGE_NAME), result, 0);
+	}
+}
+
+//=======================================================================
+//	Undoを1件にまとめる方式
+//	反映のたびに、直前の自分の書き込みを本体のUndo(メインメニューの「元に戻す」をSendMessage)で取り消し、
+//	操作開始時の状態に現在の入力状態の値をまとめて書き込み直す。操作を終えた時点で、本体のUndo履歴には1件だけ残る。
+//	  - SendMessageから戻った時点でUndoは済んでいる(検証用プラグインUndoReplaceVerifyで確認)。
+//	    PostMessageでは書き込みまでの間にプレビューが描き直され、ちらつく
+//	  - Undoは、直前の反映で自分の書き込みが確実に成功した時だけ送る(利用者の編集を取り消さないため)
+//	  - Undoの後に直前の書き込みの1つを読み直し、開始時の値に戻っていなければ、その操作の残りは従来の方式に切り替える
+//	  - 追加したエフェクトはUndoで消えるので、毎回の書き込みの中で追加し直す
+//	  - キャンセルは、最後の自分の書き込みをUndoするだけ(本体の「やり直し」にはキャンセルした変形が残る。ユーザー判断で許容)
+//=======================================================================
+
+// メインメニューの「元に戻す」 (表示言語ごとの項目名。&を除いた項目名の前方一致。EditHistoryと同じ)
+const wchar_t* const UNDO_NAMES[] = { L"元に戻す", L"Undo", L"되돌리다", L"撤销", nullptr };
+
+std::wstring menu_item_name(HMENU menu, int pos) {
+	wchar_t buf[256] = {};
+	MENUITEMINFOW mii = { sizeof(mii) };
+	mii.fMask = MIIM_STRING;
+	mii.dwTypeData = buf;
+	mii.cch = 255;
+	if (!GetMenuItemInfoW(menu, pos, TRUE, &mii)) return L"";
+	std::wstring name;
+	for (wchar_t* p = buf; *p && *p != L'\t'; p++) {
+		if (*p != L'&') name += *p;
+	}
+	return name;
+}
+
+UINT find_menu_item(HMENU menu, const wchar_t* name) {
+	int count = GetMenuItemCount(menu);
+	for (int i = 0; i < count; i++) {
+		if (HMENU sub = GetSubMenu(menu, i)) {
+			if (UINT id = find_menu_item(sub, name)) return id;
+			continue;
+		}
+		if (menu_item_name(menu, i).rfind(name, 0) == 0) return GetMenuItemID(menu, i);
+	}
+	return 0;
+}
+
+UINT find_undo_id() {
+	HMENU menu = GetMenu(edit_handle->get_host_app_window());
+	if (!menu) return 0;
+	for (const wchar_t* const* name = UNDO_NAMES; *name; name++) {
+		if (UINT id = find_menu_item(menu, *name)) return id;
+	}
+	return 0;
+}
+
+// 追加したエフェクトの値が、初期値から変わらないか (変わらないなら追加しない)
+bool created_effect_unchanged(const TargetObject& t, int kind, bool keyed) {
+	std::string e[4];
+	compute_effect_values(t, kind, keyed, e);
+	const EffectSlot& slot = t.fx[kind][keyed];
+	for (int i = 0; i < EFFECT_DEFS[kind].item_num; i++) {
+		if (e[i] != slot.track[i].raw) return false;
+	}
+	return true;
+}
+
+// 直前の反映から書き込む内容が変わったか
+bool single_needs_update(Finish finish) {
+	for (auto& t : g_state.targets) {
+		if (t.excluded) continue;
+		EffectTarget e = effect_target(t);
+		if (e.kind >= 0) {
+			const EffectSlot& slot = t.fx[e.kind][e.keyed];
+			if (!slot.prepared && !(slot.defaults_known && created_effect_unchanged(t, e.kind, e.keyed))) return true;
+		}
+		std::string v[ITEM_NUM];
+		compute_values(t, v);
+		for (int i = 0; i < ITEM_NUM; i++) {
+			if (t.track[i].valid && v[i] != t.applied[i]) return true;
+		}
+		std::string sz[4];
+		compute_size_values(t, sz);
+		for (int i = 0; i < 4; i++) {
+			if (!t.size[i].item.empty() && sz[i] != t.size[i].applied) return true;
+		}
+		for (int kind = 0; kind < FX_NUM; kind++) {
+			for (int keyed = 0; keyed < 2; keyed++) {
+				const EffectSlot& slot = t.fx[kind][keyed];
+				if (slot.id == 0) continue;
+				std::string ev[4];
+				compute_effect_values(t, kind, keyed != 0, ev);
+				for (int i = 0; i < EFFECT_DEFS[kind].item_num; i++) {
+					if (slot.valid[i] && ev[i] != slot.applied[i]) return true;
+				}
+				// 確定時に、追加したエフェクトが初期値のまま残っていれば書き込み直して取り除く
+				if (finish == Finish::Commit && slot.created && created_effect_unchanged(t, kind, keyed != 0)) return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Undoの後に、直前の書き込みが取り消されたかを確かめる
+enum class UndoCheck { Undone, NotUndone, Unknown };
+
+UndoCheck check_probe() {
+	UndoCheck result = UndoCheck::Unknown;
+	edit_handle->call_read_section_param(&result, [](void* param, EDIT_SECTION* edit) {
+		auto& result = *static_cast<UndoCheck*>(param);
+		const auto& p = g_state.probe;
+		using Kind = ModalState::Probe::Kind;
+		if (p.kind == Kind::EffectCreated) {
+			result = find_effect_by_id(edit, p.object, p.effect_id) ? UndoCheck::NotUndone : UndoCheck::Undone;
+			return;
+		}
+		LPCSTR value = nullptr;
+		if (p.kind == Kind::Item) {
+			value = edit->get_object_item_value(p.object, p.effect_name.c_str(), p.item.c_str());
+		} else if (p.kind == Kind::EffectItem) {
+			if (EFFECT_HANDLE fx = find_effect_by_id(edit, p.object, p.effect_id)) value = edit->get_effect_item_value(fx, p.item.c_str());
+		}
+		if (!value) return;
+		if (p.before == value) result = UndoCheck::Undone;
+		else if (p.after == value) result = UndoCheck::NotUndone;
+	});
+	return result;
+}
+
+// 直前の自分の書き込みを本体のUndoで取り消す
+UndoCheck undo_own_entry() {
+	g_state.own_entry = false;
+	SendMessageW(edit_handle->get_host_app_window(), WM_COMMAND, MAKEWPARAM(g_state.undo_id, 0), 0);
+	return check_probe();
+}
+
+// Undoが済んだ後の状態(操作開始時の状態)を、直近に書き込んだ値として持ち直す。
+// 追加したエフェクトはUndoで消えたので未追加に戻す(初期値は覚えておき、値が変わらないなら次から追加しない)
+void reset_to_start_state() {
+	for (auto& t : g_state.targets) {
+		for (int i = 0; i < ITEM_NUM; i++) t.applied[i] = t.track[i].raw;
+		for (auto& size : t.size) size.applied = size.track.raw;
+		for (auto& kind_slots : t.fx) {
+			for (auto& slot : kind_slots) {
+				for (int i = 0; i < 4; i++) slot.applied[i] = slot.track[i].raw;
+				if (slot.created) {
+					slot.id = 0;
+					slot.prepared = false;
+					slot.created = false;
+					slot.defaults_known = true;
+				}
+			}
+		}
+	}
+}
+
+// Undoが済んだか分からない場合に、次の書き込みで全て書き込み直すようにする。
+// 追加したエフェクトは、残っていなければ未追加に戻す
+void reset_to_unknown_state() {
+	for (auto& t : g_state.targets) {
+		for (auto& applied : t.applied) applied.clear();
+		for (auto& size : t.size) size.applied.clear();
+	}
+	edit_handle->call_read_section_param(nullptr, [](void*, EDIT_SECTION* edit) {
+		for (auto& t : g_state.targets) {
+			for (auto& kind_slots : t.fx) {
+				for (auto& slot : kind_slots) {
+					for (auto& applied : slot.applied) applied.clear();
+					if (slot.id != 0 && !find_effect_by_id(edit, t.object, slot.id)) {
+						slot.id = 0;
+						slot.prepared = false;
+						slot.created = false;
+					}
+				}
+			}
+		}
+	});
+}
+
+// 操作開始時の状態に、現在の入力状態の値をまとめて書き込む(1回の編集セクション=Undo 1件)。
+// 書き込みが1つでも成功したら、自分の書き込みがUndoに積まれたとみなす
+void single_write_from_start() {
+	g_state.probe = ModalState::Probe{};
+	bool wrote = false;
+	edit_handle->call_edit_section_param(&wrote, [](void* param, EDIT_SECTION* edit) {
+		bool& wrote = *static_cast<bool*>(param);
+		auto& probe = g_state.probe;
+		using Kind = ModalState::Probe::Kind;
+		auto record = [&](Kind kind, OBJECT_HANDLE object, const std::wstring& effect_name, int64_t effect_id, const std::wstring& item,
+			const std::string& before, const std::string& after) {
+			wrote = true;
+			if (probe.kind != Kind::None) return;
+			probe = ModalState::Probe{ kind, object, effect_name, effect_id, item, before, after };
+		};
+
+		for (auto& t : g_state.targets) {
+			if (t.excluded) continue;
+			// エフェクトの追加 (初期値が分かっていて値が変わらないなら追加しない)
+			EffectTarget e = effect_target(t);
+			if (e.kind >= 0) {
+				EffectSlot& slot = t.fx[e.kind][e.keyed];
+				if (!slot.prepared && !(slot.defaults_known && created_effect_unchanged(t, e.kind, e.keyed))) {
+					prepare_effect(edit, t, e.kind, e.keyed);
+					if (slot.created) record(Kind::EffectCreated, t.object, L"", slot.id, L"", "", "");
+					if (slot.id == 0 && t.force_effect) {
+						t.excluded = true; // 操作に対応する項目もエフェクトも無いので、以後は対象外
+						continue;
+					}
+				}
+			}
+			// 基本のエフェクト
+			std::string v[ITEM_NUM];
+			compute_values(t, v);
+			for (int i = 0; i < ITEM_NUM; i++) {
+				if (!t.track[i].valid || v[i] == t.applied[i]) continue;
+				if (edit->set_object_item_value(t.object, t.base_name.c_str(), t.items[i], v[i].c_str())) {
+					record(Kind::Item, t.object, t.base_name, 0, t.items[i], t.applied[i], v[i]);
+					t.applied[i] = v[i];
+				}
+			}
+			// 大きさの項目
+			std::string sz[4];
+			compute_size_values(t, sz);
+			for (int i = 0; i < 4; i++) {
+				SizeItem& size = t.size[i];
+				if (size.item.empty() || sz[i] == size.applied) continue;
+				if (edit->set_object_item_value(t.object, t.size_effect.c_str(), size.item.c_str(), sz[i].c_str())) {
+					record(Kind::Item, t.object, t.size_effect, 0, size.item, size.applied, sz[i]);
+					size.applied = sz[i];
+				}
+			}
+			// エフェクトの値。追加したエフェクトが初期値のままでも、この編集セクションの中では削除しない
+			// (追加と削除を同じ編集セクションで行った時にUndoが積まれるか分からず、積まれなければ次のUndoが利用者の編集を取り消すため)。
+			// 初期値のまま確定した場合は、確定時にUndoしてから追加せずに書き込み直すことで取り除く(single_needs_update)
+			for (int kind = 0; kind < FX_NUM; kind++) {
+				for (int keyed = 0; keyed < 2; keyed++) {
+					EffectSlot& slot = t.fx[kind][keyed];
+					if (slot.id == 0) continue;
+					EFFECT_HANDLE fx = find_effect_by_id(edit, t.object, slot.id);
+					if (!fx) continue;
+					std::string ev[4];
+					compute_effect_values(t, kind, keyed != 0, ev);
+					for (int i = 0; i < EFFECT_DEFS[kind].item_num; i++) {
+						if (!slot.valid[i] || ev[i] == slot.applied[i]) continue;
+						if (edit->set_effect_item_value(fx, EFFECT_DEFS[kind].items[i], ev[i].c_str())) {
+							if (!slot.created) record(Kind::EffectItem, t.object, L"", slot.id, EFFECT_DEFS[kind].items[i], slot.applied[i], ev[i]);
+							else wrote = true;
+							slot.applied[i] = ev[i];
+						}
+					}
+				}
+			}
+		}
+	});
+	g_state.own_entry = wrote;
+	if (wrote) g_state.ever_wrote = true;
+}
+
+// Undoを1件にまとめる方式で、現在の入力状態を反映する。この方式でない場合や、途中でUndoを確かめられなくなった場合は従来の方式
+void sync_state(Finish finish) {
+	if (!g_state.single_undo) {
+		sync_values(finish);
+		return;
+	}
+	if (finish == Finish::Cancel) {
+		if (!g_state.own_entry) return; // まだ何も書き込んでいない
+		UndoCheck check = undo_own_entry();
+		if (check == UndoCheck::Undone) return;
+		// Undoを確かめられないので、従来の方式で開始時の値に戻す
+		log_line(L"[KeychainToTransform] 本体のUndoで取り消せたか確かめられなかったため、書き込みで元に戻しました");
+		if (check == UndoCheck::Unknown) reset_to_unknown_state();
+		g_state.single_undo = false;
+		set_active_mark(false, RESULT_FALLBACK);
+		sync_values(finish);
+		return;
+	}
+	if (!single_needs_update(finish)) return;
+	if (g_state.own_entry) {
+		UndoCheck check = undo_own_entry();
+		if (check != UndoCheck::Undone) {
+			log_line(L"[KeychainToTransform] 本体のUndoで取り消せたか確かめられなかったため、この操作の残りはUndoをまとめずに反映します");
+			if (check == UndoCheck::Unknown) reset_to_unknown_state();
+			g_state.single_undo = false;
+			set_active_mark(false, RESULT_FALLBACK);
+			sync_values(finish);
+			return;
+		}
+		reset_to_start_state();
+	}
+	single_write_from_start();
+}
+
+//=======================================================================
 //	状態表示 (HUD)
 //=======================================================================
 std::wstring format_number(double v, const wchar_t* format) {
@@ -1678,7 +2008,15 @@ void find_camera(EDIT_SECTION* edit, TargetObject& t, int layer, int frame) {
 //=======================================================================
 void end_modal(bool commit) {
 	if (!g_state.active) return;
-	sync_values(commit ? Finish::Commit : Finish::Cancel);
+	sync_state(commit ? Finish::Commit : Finish::Cancel);
+	// 操作の結果を監視する側に伝える (途中でUndoをまとめる方式をやめた場合は、その時点で印を外している)
+	if (g_state.single_undo) {
+		WPARAM result = RESULT_NO_WRITE;
+		// 確定でも、最後に開始時と同じ値に戻していた場合は、本体の状態は開始時のままでやり直せる分だけが置き換わっている(キャンセルと同じ)
+		if (commit && g_state.own_entry) result = RESULT_COMMITTED;
+		else if (g_state.ever_wrote) result = RESULT_CANCELED;
+		set_active_mark(false, result);
+	}
 	g_state.active = false;
 	if (g_keyboard_hook) { UnhookWindowsHookEx(g_keyboard_hook); g_keyboard_hook = nullptr; }
 	if (g_mouse_hook) { UnhookWindowsHookEx(g_mouse_hook); g_mouse_hook = nullptr; }
@@ -1719,7 +2057,7 @@ void poll_modal() {
 	wrap_cursor(p);
 	g_state.last_cursor = p;
 
-	sync_values(Finish::None);
+	sync_state(Finish::None);
 	update_hud();
 }
 
@@ -1814,6 +2152,11 @@ void begin_modal(EDIT_SECTION* edit, Mode mode) {
 		if (focus) objects.push_back(focus);
 	}
 
+	// Undoを1件にまとめる方式を使うか (設定が有効で、メインメニューの「元に戻す」が見つかった場合)
+	UINT undo_id = g_settings.single_undo ? find_undo_id() : 0;
+	bool single_undo = (undo_id != 0);
+	if (g_settings.single_undo && !single_undo) log_line(L"[KeychainToTransform] メインメニューに「元に戻す」が見つからないため、Undoをまとめずに反映します");
+
 	std::vector<TargetObject> targets;
 	int skipped = 0;
 	for (auto obj : objects) {
@@ -1822,13 +2165,17 @@ void begin_modal(EDIT_SECTION* edit, Mode mode) {
 			skipped++;
 			continue;
 		}
-		// 操作に対応する項目を持たない場合は、Alt指定時と同じエフェクトの追加を試し、追加できた場合のみ対象にする
+		// 操作に対応する項目を持たない場合は、Alt指定時と同じエフェクトの追加を試し、追加できた場合のみ対象にする。
+		// Undoを1件にまとめる方式では、ここで追加するとそれだけでUndoが積まれるので、最初の書き込みの中で追加を試す
+		// (追加できなければその時点で対象外にする)
 		if (!supports_mode(t, mode)) {
-			int kind = mode_effect_of(mode);
-			prepare_effect(edit, t, kind, false);
-			if (t.fx[kind][0].id == 0) {
-				skipped++;
-				continue;
+			if (!single_undo) {
+				int kind = mode_effect_of(mode);
+				prepare_effect(edit, t, kind, false);
+				if (t.fx[kind][0].id == 0) {
+					skipped++;
+					continue;
+				}
 			}
 			t.force_effect = true;
 		}
@@ -1845,6 +2192,9 @@ void begin_modal(EDIT_SECTION* edit, Mode mode) {
 	g_state.mode = mode;
 	g_state.targets = targets;
 	g_state.trigger_key = detect_trigger_key();
+	g_state.single_undo = single_undo;
+	g_state.undo_id = undo_id;
+	if (single_undo) set_active_mark(true);
 	GetCursorPos(&g_state.last_cursor);
 
 	// フックはメインスレッド(このコールバックの呼び出しスレッド)限定で張る
@@ -1947,6 +2297,7 @@ void apply_setting(const std::wstring& key, const std::wstring& value) {
 	else if (key == L"poll_ms") { v = g_settings.poll_ms; set_number(value, 10, 1000, v); g_settings.poll_ms = (int)v; }
 	else if (key == L"invert_camera_pitch") g_settings.invert_camera_pitch = (value == L"1");
 	else if (key == L"invert_wheel") g_settings.invert_wheel = (value == L"1");
+	else if (key == L"single_undo") g_settings.single_undo = (value == L"1");
 	else {
 		for (int i = 0; i < 4; i++) if (key == SIZE_ITEM_KEYS[i]) g_settings.size_items[i] = value;
 	}
@@ -1988,6 +2339,7 @@ void save_settings() {
 	ss << L"poll_ms=" << g_settings.poll_ms << L"\n";
 	ss << L"invert_camera_pitch=" << (g_settings.invert_camera_pitch ? L"1" : L"0") << L"\n";
 	ss << L"invert_wheel=" << (g_settings.invert_wheel ? L"1" : L"0") << L"\n";
+	ss << L"single_undo=" << (g_settings.single_undo ? L"1" : L"0") << L"\n";
 	for (int i = 0; i < 4; i++) ss << SIZE_ITEM_KEYS[i] << L"=" << g_settings.size_items[i] << L"\n";
 	std::string buf = wide_to_utf8(ss.str());
 	HANDLE file = CreateFileW(get_settings_path().c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2033,6 +2385,7 @@ TextField g_size_fields[4] = {
 };
 HWND g_check_invert_camera_pitch = nullptr;
 HWND g_check_invert_wheel = nullptr;
+HWND g_check_single_undo = nullptr;
 HWND g_static_note = nullptr;
 
 std::wstring setting_text(const wchar_t* key) {
@@ -2057,6 +2410,7 @@ void apply_settings_from_ui() {
 	}
 	g_settings.invert_camera_pitch = (SendMessage(g_check_invert_camera_pitch, BM_GETCHECK, 0, 0) == BST_CHECKED);
 	g_settings.invert_wheel = (SendMessage(g_check_invert_wheel, BM_GETCHECK, 0, 0) == BST_CHECKED);
+	g_settings.single_undo = (SendMessage(g_check_single_undo, BM_GETCHECK, 0, 0) == BST_CHECKED);
 	wchar_t text[256];
 	for (int i = 0; i < 4; i++) {
 		GetWindowTextW(g_size_fields[i].edit, text, 256);
@@ -2096,7 +2450,7 @@ LRESULT CALLBACK config_dlg_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
 		case WM_DESTROY:
 			for (auto& f : g_number_fields) f.edit = nullptr;
 			for (auto& f : g_size_fields) f.edit = nullptr;
-			g_check_invert_camera_pitch = g_check_invert_wheel = g_static_note = nullptr;
+			g_check_invert_camera_pitch = g_check_invert_wheel = g_check_single_undo = g_static_note = nullptr;
 			PostQuitMessage(0); // このウィンドウ専用のメッセージループのみを抜ける
 			return 0;
 	}
@@ -2107,7 +2461,7 @@ void show_config_dialog(HWND parent, HINSTANCE dll_hinst) {
 	const int row_h = 34, label_w = 300, edit_w = 90, text_w = 180, margin = 16;
 	const int field_num = (int)(sizeof(g_number_fields) / sizeof(g_number_fields[0]));
 	int dw = margin * 2 + label_w + text_w + 20;
-	int dh = margin + row_h * field_num + 30 * 2 + 12 + 36 + row_h * 4 + 12 + 70 + 50 + 50;
+	int dh = margin + row_h * field_num + 30 * 3 + 12 + 36 + row_h * 4 + 12 + 70 + 50 + 50;
 	int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
 	if (parent && IsWindow(parent)) {
 		RECT prc;
@@ -2134,6 +2488,9 @@ void show_config_dialog(HWND parent, HINSTANCE dll_hinst) {
 	top += 30;
 	g_check_invert_wheel = CreateWindowEx(0, WC_BUTTON, L"ホイールの向きを反転する", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
 		margin, top, label_w + edit_w, 24, dlg, nullptr, hinst, nullptr);
+	top += 30;
+	g_check_single_undo = CreateWindowEx(0, WC_BUTTON, L"操作中の変更をUndo 1件にまとめる", WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+		margin, top, label_w + text_w, 24, dlg, nullptr, hinst, nullptr);
 	top += 36;
 	// 区切り線
 	CreateWindowEx(0, WC_STATIC, L"", WS_VISIBLE | WS_CHILD | SS_ETCHEDHORZ, margin, top, label_w + text_w, 2, dlg, nullptr, hinst, nullptr);
@@ -2166,6 +2523,7 @@ void show_config_dialog(HWND parent, HINSTANCE dll_hinst) {
 	}
 	SendMessage(g_check_invert_camera_pitch, BM_SETCHECK, g_settings.invert_camera_pitch ? BST_CHECKED : BST_UNCHECKED, 0);
 	SendMessage(g_check_invert_wheel, BM_SETCHECK, g_settings.invert_wheel ? BST_CHECKED : BST_UNCHECKED, 0);
+	SendMessage(g_check_single_undo, BM_SETCHECK, g_settings.single_undo ? BST_CHECKED : BST_UNCHECKED, 0);
 	SendMessage(dlg, DM_SETDEFID, IDC_BTN_OK, 0);
 
 	EnableWindow(parent, FALSE);
@@ -2197,6 +2555,7 @@ void on_config_menu(HWND hwnd, HINSTANCE dll_hinst) {
 //	プラグイン登録関数
 //=======================================================================
 EXTERN_C __declspec(dllexport) void UninitializePlugin() {
+	if (g_state.active && edit_handle) set_active_mark(false);
 	if (g_keyboard_hook) UnhookWindowsHookEx(g_keyboard_hook);
 	if (g_mouse_hook) UnhookWindowsHookEx(g_mouse_hook);
 	if (g_hud_font) DeleteObject(g_hud_font);
